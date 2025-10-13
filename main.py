@@ -1,7 +1,9 @@
 import os
 import sys
+import json
 import asyncio
 import logging
+from datetime import datetime, timezone
 from urllib.parse import urlparse
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F
@@ -11,12 +13,28 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardRemove
 
-# === Логирование в stdout (чтобы Railway не подсвечивал красным) ===
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s:%(name)s:%(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)]
-)
+
+# === JSON-логгер (чтобы Railway не помечал логи как ошибки) ===
+class JsonStdoutHandler(logging.StreamHandler):
+    def __init__(self):
+        super().__init__(stream=sys.stdout)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            payload = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "severity": record.levelname,      # <-- Railway теперь понимает INFO
+                "logger": record.name,
+                "message": record.getMessage(),
+            }
+            self.stream.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            self.flush()
+        except Exception:
+            pass
+
+
+logging.basicConfig(level=logging.INFO, handlers=[JsonStdoutHandler()], force=True)
+
 for name in ("aiogram", "aiohttp", "asyncio"):
     lg = logging.getLogger(name)
     lg.handlers = []
@@ -24,9 +42,11 @@ for name in ("aiogram", "aiohttp", "asyncio"):
 
 log = logging.getLogger("support-bot")
 
+
 # === Мини веб-сервер для healthcheck ===
 async def _ping(_):
     return web.Response(text="OK")
+
 
 async def start_web():
     app = web.Application()
@@ -37,32 +57,34 @@ async def start_web():
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    print(f"🌐 Web healthcheck on port {port}")
+    print(json.dumps({"severity": "INFO", "message": f"🌐 Web healthcheck on port {port}"}))
+
 
 # === ENV ===
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 SUPPORT_GROUP_ID_ENV = os.getenv("SUPPORT_GROUP_ID", "").strip()
 SUPPORT_GROUP_ID = int(SUPPORT_GROUP_ID_ENV) if SUPPORT_GROUP_ID_ENV not in ("", None) else None
 
+
 # === BOT ===
 bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-# === Служебные структуры ===
 forward_map: dict[int, tuple[int, int]] = {}
 states: dict[int, dict] = {}
 
-# === Текст ===
+
+# === Текст условий ===
 TERMS_TEXT = (
     "<b>Чтобы получить вознаграждение:</b>\n\n"
     "1) Укажите ссылку на видео\n"
-    "2) Приложите доказательство, что аккаунт принадлежит вам (лучше всего — скрин(ы) аналитики видео)\n"
-    "3) Укажите реквизиты для получения вознаграждения\n\n"
+    "2) Приложите доказательство (лучше всего — скрин(ы) аналитики)\n"
+    "3) Укажите реквизиты для выплаты\n\n"
     "<b>Выплаты</b> — только <u>криптовалютой</u> (USDT).\n\n"
 
     "<blockquote expandable>"
-    "<b>▶️ Нажмите, чтобы раскрыть инструкцию по выводу</b>\n\n"
-    "• Самый быстрый вариант — кошелёк <code>@wallet</code> внутри Telegram\n"
+    "<b>▶️ Инструкция по выводу:</b>\n\n"
+    "• Самый простой способ — Telegram-кошелёк <code>@wallet</code>\n"
     "1) Запустите @wallet → пройдите верификацию\n"
     "2) Кошелёк → Пополнить → Внешний кошелёк → Доллары → TRC20 / TON\n\n"
     "Порог выплаты: USDT TON — от $20, TRC20 — от $100"
@@ -83,14 +105,16 @@ TERMS_TEXT = (
     "• Разница между оригиналом и вашим видео — не более 30 дней"
     "</blockquote>\n\n"
 
-    "⬇️ Нажмите «Запросить выплату» и следуйте шагам."
+    "⬇️ Когда готовы — нажмите «Запросить выплату» и следуйте шагам."
 )
+
 
 # === Утилиты ===
 def user_label(msg: Message) -> str:
     u = msg.from_user
     uname = f"@{u.username}" if u.username else "—"
     return f"{u.full_name} ({uname}, id={u.id})"
+
 
 def has_single_media(msg: Message):
     if msg.media_group_id:
@@ -107,6 +131,7 @@ def has_single_media(msg: Message):
     if not media:
         return False, None, "Отправьте файл или скрин, не только текст."
     return True, media, None
+
 
 def extract_url_from_message(msg: Message):
     text = (msg.text or msg.caption or "").strip()
@@ -129,35 +154,38 @@ def extract_url_from_message(msg: Message):
         return "https://" + text if not text.startswith("http") else text
     return None
 
+
 def terms_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💸 Запросить выплату", callback_data="payout:start")]
     ])
+
 
 def again_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Подать ещё одну заявку", callback_data="payout:start")]
     ])
 
+
 # === Команды ===
 @dp.message(CommandStart(), F.chat.type == "private")
 async def start_dm(msg: Message):
     await msg.answer(TERMS_TEXT, reply_markup=terms_keyboard())
 
+
 @dp.message(Command("where"))
 async def where(msg: Message):
     await msg.reply(f"Этот чат имеет id: <code>{msg.chat.id}</code>")
+
 
 # === Логика заявки ===
 @dp.callback_query(F.data == "payout:start")
 async def payout_start(cq: CallbackQuery):
     user_id = cq.from_user.id
     states[user_id] = {"stage": "link"}
-    await cq.message.answer(
-        "Шаг <b>1/3</b> — пришлите ссылку на видео.",
-        reply_markup=ReplyKeyboardRemove()
-    )
+    await cq.message.answer("Шаг <b>1/3</b> — пришлите ссылку на видео.", reply_markup=ReplyKeyboardRemove())
     await cq.answer()
+
 
 @dp.message(F.chat.type == "private", ~F.from_user.is_bot)
 async def handle_user_dm(msg: Message):
@@ -226,6 +254,7 @@ async def handle_user_dm(msg: Message):
     sent = await msg.copy_to(SUPPORT_GROUP_ID)
     forward_map[sent.message_id] = (msg.chat.id, msg.message_id)
 
+
 # === Ответы из группы ===
 @dp.message(lambda m: SUPPORT_GROUP_ID and m.chat.id == SUPPORT_GROUP_ID)
 async def handle_group(msg: Message):
@@ -245,15 +274,14 @@ async def handle_group(msg: Message):
     else:
         await msg.copy_to(user_chat_id)
 
+
 # === Старт ===
 async def main():
     if not BOT_TOKEN:
         raise RuntimeError("Не задан BOT_TOKEN.")
     log.info("✅ Bot starting… /where в группе покажет chat_id.")
-    await asyncio.gather(
-        start_web(),
-        dp.start_polling(bot)
-    )
+    await asyncio.gather(start_web(), dp.start_polling(bot))
+
 
 if __name__ == "__main__":
     asyncio.run(main())
