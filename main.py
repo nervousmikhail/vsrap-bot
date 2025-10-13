@@ -10,6 +10,25 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardRemove
 
+# ---- мини веб-сервер для healthcheck (Railway/Web) ----
+from aiohttp import web
+
+async def _ping(_):
+    return web.Response(text="OK")
+
+async def start_web():
+    app = web.Application()
+    app.router.add_get("/", _ping)
+    app.router.add_get("/health", _ping)
+    port = int(os.getenv("PORT", "8080"))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"🌐 Web healthcheck on port {port}")
+
+# -------------------------------------------------------
+
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("support-bot")
 
@@ -272,7 +291,11 @@ async def main():
     if not BOT_TOKEN:
         raise RuntimeError("Не задан BOT_TOKEN в Environment.")
     log.info("✅ Bot starting… /where в группе покажет chat_id.")
-    await dp.start_polling(bot)
+    # запускаем веб-эндпоинт и бота параллельно
+    await asyncio.gather(
+        start_web(),
+        dp.start_polling(bot)
+    )
 
 if __name__ == "__main__":
     asyncio.run(main())
