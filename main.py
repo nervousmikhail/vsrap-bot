@@ -74,8 +74,23 @@ forward_map: dict[int, tuple[int, int]] = {}
 states: dict[int, dict] = {}
 
 
+# === Список актуальных выпусков (для текста и /videos) ===
+EPISODES_TEXT = (
+    "• VSRAP Podcast — MADK1D\n"
+    "• Или-или: ДИЛАРА, АКУЛИЧ, Мэйби Бэйби, ALISHA\n"
+    "• Или-или: Bushido Zho, Frame Tamer, Руслан Усачев, Денис Кукояка\n"
+    "• VSRAP Podcast — Темный принц"
+)
+
+
 # === Текст условий ===
 TERMS_TEXT = (
+    "<b>Важно:</b> нарезки принимаем <u>не по любым видео</u>, а только по актуальным "
+    "выпускам подкаста и шоу VSRAP.\n\n"
+    "<b>Сейчас участвуют в программе только эти выпуски:</b>\n"
+    f"{EPISODES_TEXT}\n\n"
+    "<i>Нарезки с других выпусков могут не быть одобрены и не попасть под выплату.</i>\n\n"
+
     "<b>Чтобы получить вознаграждение:</b>\n\n"
     "1) Укажите ссылку на видео\n"
     "2) Приложите доказательство (лучше всего — скрин(ы) аналитики)\n"
@@ -178,6 +193,13 @@ async def where(msg: Message):
     await msg.reply(f"Этот чат имеет id: <code>{msg.chat.id}</code>")
 
 
+@dp.message(Command("videos"))
+async def videos(msg: Message):
+    await msg.answer(
+        "<b>📺 Актуальные выпуски для нарезок:</b>\n\n" + EPISODES_TEXT
+    )
+
+
 # === Логика заявки ===
 @dp.callback_query(F.data == "payout:start")
 async def payout_start(cq: CallbackQuery):
@@ -198,6 +220,7 @@ async def handle_user_dm(msg: Message):
     if st:
         stage = st.get("stage")
 
+        # Шаг 1/3 — ссылка
         if stage == "link":
             url = extract_url_from_message(msg)
             if not url:
@@ -208,6 +231,7 @@ async def handle_user_dm(msg: Message):
             await msg.answer("Ссылка принята ✅\nТеперь пришлите один скрин/файл подтверждения.")
             return
 
+        # Шаг 2/3 — пруф
         if stage == "proof":
             ok, media, err = has_single_media(msg)
             if not ok:
@@ -218,6 +242,7 @@ async def handle_user_dm(msg: Message):
             await msg.answer("Пруф получен ✅\nТеперь укажите реквизиты (кошелёк USDT или контакт).")
             return
 
+        # Шаг 3/3 — реквизиты
         if stage == "requisites":
             text = (msg.caption or msg.text or "").strip() or "—"
             st["requisites"] = text
@@ -244,7 +269,11 @@ async def handle_user_dm(msg: Message):
                 elif t == "animation":
                     await bot.send_animation(SUPPORT_GROUP_ID, m["file_id"], caption=cap)
 
-            await msg.answer("✅ Заявка отправлена модерации.", reply_markup=again_keyboard())
+            await msg.answer(
+                "✅ Заявка отправлена модерации.\n\n"
+                "Если у вас есть ещё нарезки по этим выпускам — подайте новую заявку.",
+                reply_markup=again_keyboard()
+            )
             states.pop(user_id, None)
             return
 
