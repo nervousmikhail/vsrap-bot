@@ -132,7 +132,7 @@ def user_label(msg: Message) -> str:
 
 def has_single_media(msg: Message):
     if msg.media_group_id:
-        return False, None, "Пришлите один файл, не альбом."
+        return False, None, "Пожалуйста, пришлите <b>один</b> скрин/файл, не альбом."
     media = None
     if msg.photo:
         media = {"type": "photo", "file_id": msg.photo[-1].file_id, "caption": msg.caption or ""}
@@ -143,7 +143,7 @@ def has_single_media(msg: Message):
     elif msg.animation:
         media = {"type": "animation", "file_id": msg.animation.file_id, "caption": msg.caption or ""}
     if not media:
-        return False, None, "Пришлите один скрин/файл/видео."
+        return False, None, "Пришлите один скрин/файл/видео, не только текст."
     return True, media, None
 
 
@@ -186,10 +186,16 @@ def again_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
+def restart_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔁 В начало", callback_data="restart")]
+    ])
+
+
 # === commands ===
 @dp.message(CommandStart(), F.chat.type == "private")
 async def start_dm(msg: Message):
-    await msg.answer(TERMS_TEXT, reply_markup=terms_keyboard())
+    await msg.answer(TERMS_TEXT, reply_markup=menu_keyboard())
 
 
 @dp.message(Command("videos"))
@@ -204,7 +210,20 @@ async def where(msg: Message):
 
 @dp.callback_query(F.data == "show_terms")
 async def show_terms(cq: CallbackQuery):
-    await cq.message.answer(TERMS_TEXT, reply_markup=terms_keyboard())
+    await cq.message.answer(TERMS_TEXT, reply_markup=menu_keyboard())
+    await cq.answer()
+
+
+@dp.callback_query(F.data == "restart")
+async def restart_flow(cq: CallbackQuery):
+    user_id = cq.from_user.id
+    states.pop(user_id, None)
+    await cq.message.answer(
+        "Текущая заявка (если была) отменена.\n\n"
+        "Начинаем сначала. Вот подробные условия участия и актуальные выпуски:",
+        reply_markup=menu_keyboard()
+    )
+    await cq.message.answer(TERMS_TEXT, reply_markup=menu_keyboard())
     await cq.answer()
 
 
@@ -237,7 +256,12 @@ async def handle_user_dm(msg: Message):
         if stage == "link":
             url = extract_url_from_message(msg)
             if not url:
-                await msg.answer("Отправьте корректную ссылку на видео.")
+                await msg.answer(
+                    "Это не похоже на корректную ссылку.\n\n"
+                    "Пришлите, пожалуйста, рабочий URL на видео.\n\n"
+                    "Если хотите начать всё заново — нажмите «В начало».",
+                    reply_markup=restart_keyboard()
+                )
                 return
             st["link"] = url
             st["stage"] = "proof"
@@ -252,7 +276,10 @@ async def handle_user_dm(msg: Message):
         if stage == "proof":
             ok, media, err = has_single_media(msg)
             if not ok:
-                await msg.answer(err)
+                await msg.answer(
+                    err + "\n\nЕсли хотите начать заново — нажмите «В начало».",
+                    reply_markup=restart_keyboard()
+                )
                 return
             st["media"] = media
             st["stage"] = "requisites"
@@ -265,7 +292,18 @@ async def handle_user_dm(msg: Message):
 
         # === 3. реквизиты ===
         if stage == "requisites":
-            text = (msg.caption or msg.text or "").strip() or "—"
+            text = (msg.caption or msg.text or "").strip()
+
+            # простая проверка, чтобы не пропускать совсем пустое / слишком короткое
+            if not text or len(text) < 5:
+                await msg.answer(
+                    "Похоже, реквизиты указаны слишком коротко или пустые.\n\n"
+                    "Пришлите, пожалуйста, кошелёк USDT или понятный контакт для связи.\n\n"
+                    "Если хотите начать всё заново — нажмите «В начало».",
+                    reply_markup=restart_keyboard()
+                )
+                return
+
             st["requisites"] = text
 
             # отправка в группу
@@ -298,15 +336,15 @@ async def handle_user_dm(msg: Message):
             states.pop(user_id, None)
             return
 
-    # === НЕ в процессе заявки: ничего не пересылаем в группу ===
+    # === НЕ в процессе заявки: ничего в группу не шлём ===
     await msg.answer(
         "Сейчас бот принимает только заявки на выплату за нарезки.\n\n"
-        "Чтобы оформить заявку, нажмите одну из кнопок ниже.",
+        "Чтобы оформить заявку, используйте кнопки ниже.",
         reply_markup=menu_keyboard()
     )
 
 
-# === replies from group → user (остаётся для заявок) ===
+# === replies from group → user (для уже созданных заявок) ===
 @dp.message(lambda m: SUPPORT_GROUP_ID and m.chat.id == SUPPORT_GROUP_ID)
 async def handle_group(msg: Message):
     if not msg.reply_to_message:
