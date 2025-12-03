@@ -5,6 +5,7 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 from urllib.parse import urlparse
+
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery
@@ -114,6 +115,7 @@ TERMS_TEXT = (
     "<b>❗️ Важно:</b>\n"
     "• Видео должно использовать материалы VSRAP\n"
     "• Обязательно: хэштег <code>#vsrapedit</code> и упоминание канала\n"
+    "• Публикация не раньше 10.10.2025\n"
     "• Без сторонней рекламы\n"
     "• Разница между оригиналом и нарезкой — не более 30 дней"
     "</blockquote>\n\n"
@@ -156,7 +158,7 @@ def extract_url_from_message(msg: Message):
                     return e.url
                 try:
                     return text[e.offset:e.offset + e.length]
-                except:
+                except Exception:
                     pass
     if text.startswith(("http://", "https://")):
         parsed = urlparse(text)
@@ -165,13 +167,20 @@ def extract_url_from_message(msg: Message):
     return None
 
 
-def terms_keyboard():
+def terms_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💸 Запросить выплату", callback_data="payout:start")]
     ])
 
 
-def again_keyboard():
+def menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📋 Узнать условия", callback_data="show_terms")],
+        [InlineKeyboardButton(text="💸 Запросить выплату", callback_data="payout:start")],
+    ])
+
+
+def again_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Подать ещё одну заявку", callback_data="payout:start")]
     ])
@@ -191,6 +200,12 @@ async def videos(msg: Message):
 @dp.message(Command("where"))
 async def where(msg: Message):
     await msg.reply(f"Chat ID: <code>{msg.chat.id}</code>")
+
+
+@dp.callback_query(F.data == "show_terms")
+async def show_terms(cq: CallbackQuery):
+    await cq.message.answer(TERMS_TEXT, reply_markup=terms_keyboard())
+    await cq.answer()
 
 
 # === main flow (3 шага) ===
@@ -244,7 +259,7 @@ async def handle_user_dm(msg: Message):
             await msg.answer(
                 "Пруф получен ✅\n\n"
                 "Шаг <b>3/3</b> — укажите реквизиты для выплаты "
-                "(кошелёк USDT или контакт для связи). Можно текстом или файлом."
+                "(кошелёк USDT или контакт для связи). Можно прислать текстом или файлом."
             )
             return
 
@@ -283,14 +298,15 @@ async def handle_user_dm(msg: Message):
             states.pop(user_id, None)
             return
 
-    # === обычный мост ===
-    header = f"🆕 Сообщение от {user_label(msg)}"
-    await bot.send_message(SUPPORT_GROUP_ID, header)
-    sent = await msg.copy_to(SUPPORT_GROUP_ID)
-    forward_map[sent.message_id] = (msg.chat.id, msg.message_id)
+    # === НЕ в процессе заявки: ничего не пересылаем в группу ===
+    await msg.answer(
+        "Сейчас бот принимает только заявки на выплату за нарезки.\n\n"
+        "Чтобы оформить заявку, нажмите одну из кнопок ниже.",
+        reply_markup=menu_keyboard()
+    )
 
 
-# === replies from group → user ===
+# === replies from group → user (остаётся для заявок) ===
 @dp.message(lambda m: SUPPORT_GROUP_ID and m.chat.id == SUPPORT_GROUP_ID)
 async def handle_group(msg: Message):
     if not msg.reply_to_message:
