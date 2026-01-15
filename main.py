@@ -76,10 +76,12 @@ states: dict[int, dict] = {}
 
 # === список актуальных выпусков ===
 EPISODES_TEXT = (
-    "• VSRAP Podcast — MADK1D\n"
     "• Или-или: ДИЛАРА, АКУЛИЧ, Мэйби Бэйби, ALISHA\n"
     "• Или-или: Bushido Zho, Frame Tamer, Руслан Усачев, Денис Кукояка\n"
-    "• VSRAP Podcast — Темный принц"
+    "• VSRAP Podcast — MADK1D\n"
+    "• VSRAP Podcast — Темный принц\n"
+    "• VSRAP Podcast — Feduk\n"
+    "• VSRAP Podcast — Фломастер\n"
 )
 
 
