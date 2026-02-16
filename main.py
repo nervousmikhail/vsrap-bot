@@ -28,11 +28,17 @@ SUPPORT_GROUP_ID = int(SUPPORT_GROUP_ID_ENV) if SUPPORT_GROUP_ID_ENV else None
 bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-# соответствия: message_id в группе -> user_chat_id
-forward_map: dict[int, int] = {}
-
 # states[user_id] = {"mode": "payout"|"contact", "stage": "...", ...}
 states: dict[int, dict] = {}
+
+# message_id в группе -> user_chat_id (чтобы reply в группе тоже работал)
+forward_map: dict[int, int] = {}
+
+# ticket -> user_chat_id (для кнопки "Ответить пользователю")
+ticket_map: dict[int, int] = {}
+
+# admin_id -> {"user_chat_id": int, "ticket": int} (после нажатия кнопки)
+awaiting_admin_reply: dict[int, dict] = {}
 
 # =======================
 #   TEXTS
@@ -47,7 +53,7 @@ WELCOME_TEXT = (
 )
 
 RATES_TEXT = (
-    "<b>💰 Тарифы:</b>\n\n"
+    "<b>Тарифы:</b>\n\n"
     "• TikTok от 100 000 просмотров — 500 ₽\n"
     "• TikTok от 200 000 просмотров — 1 000 ₽\n"
     "• TikTok от 1 000 000 — 4 000 ₽\n"
@@ -119,6 +125,12 @@ def payout_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="menu:main")],
     ])
 
+def reply_user_kb(ticket: int) -> InlineKeyboardMarkup:
+    # ticket в callback_data
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Ответить пользователю", callback_data=f"admin:reply:{ticket}")]
+    ])
+
 def again_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Подать заявку", callback_data="payout:start")],
@@ -138,7 +150,6 @@ def user_label(msg: Message) -> str:
     return f"{u.full_name} ({uname}, id={u.id})"
 
 def extract_url_from_message(msg: Message) -> str | None:
-    """Берём URL из текста и валидируем схему/домен."""
     text = (msg.text or msg.caption or "").strip()
     if not text:
         return None
@@ -147,7 +158,6 @@ def extract_url_from_message(msg: Message) -> str | None:
         if p.scheme in ("http", "https") and p.netloc:
             return text
         return None
-    # допускаем домены без схемы
     if text.startswith(("t.me/", "www.", "youtu.be/", "youtube.com/", "vk.com/", "instagram.com/", "x.com/", "twitter.com/")):
         text2 = "https://" + text
         p = urlparse(text2)
@@ -156,9 +166,6 @@ def extract_url_from_message(msg: Message) -> str | None:
     return None
 
 def has_single_media(msg: Message) -> tuple[bool, dict | None, str | None]:
-    """
-    Ровно одно вложение (фото/док/видео/gif). Альбомы запрещены.
-    """
     if msg.media_group_id:
         return False, None, "Пожалуйста, пришлите <b>один</b> скрин/файл, не альбом."
     media = None
@@ -173,14 +180,6 @@ def has_single_media(msg: Message) -> tuple[bool, dict | None, str | None]:
     if not media:
         return False, None, "Это только текст без вложений. Пришлите один скрин/файл/видео."
     return True, media, None
-
-async def send_to_support(header_html: str, user_chat_id: int) -> int:
-    """
-    Отправляем хедер в группу и сохраняем mapping, чтобы реплаи админов возвращались пользователю.
-    """
-    sent = await bot.send_message(SUPPORT_GROUP_ID, header_html)
-    forward_map[sent.message_id] = user_chat_id
-    return sent.message_id
 
 # =======================
 #   COMMANDS
@@ -209,23 +208,19 @@ async def menu_handler(cq: CallbackQuery):
     action = cq.data.split(":")[1]
     uid = cq.from_user.id
 
-    # любой переход в меню сбрасывает режимы (чтобы человек не “застрял”)
+    # если человек был в режиме contact — сбросим
     if action in ("main", "rates", "podcasts", "payout"):
         if uid in states and states[uid].get("mode") == "contact":
             states.pop(uid, None)
 
     if action == "main":
         await cq.message.edit_text("Главное меню", reply_markup=main_menu_kb())
-
     elif action == "rates":
         await cq.message.edit_text(RATES_TEXT, reply_markup=back_kb())
-
     elif action == "podcasts":
         await cq.message.edit_text(PODCASTS_TEXT, reply_markup=back_kb())
-
     elif action == "payout":
         await cq.message.edit_text(PAYOUT_INFO_TEXT, reply_markup=payout_kb())
-
     elif action == "contact":
         states[uid] = {"mode": "contact"}
         await cq.message.edit_text(CONTACT_TEXT, reply_markup=back_kb())
@@ -233,7 +228,7 @@ async def menu_handler(cq: CallbackQuery):
     await cq.answer()
 
 # =======================
-#   PAYOUT FLOW
+#   PAYOUT FLOW (3 steps)
 # =======================
 
 @dp.callback_query(F.data == "payout:start")
@@ -247,24 +242,74 @@ async def payout_start(cq: CallbackQuery):
     )
     await cq.answer()
 
+# =======================
+#   ADMIN BUTTON: REPLY
+# =======================
+
+@dp.callback_query(F.data.startswith("admin:reply:"))
+async def admin_reply_btn(cq: CallbackQuery):
+    # эта кнопка жмётся В ГРУППЕ
+    if SUPPORT_GROUP_ID is None or cq.message.chat.id != SUPPORT_GROUP_ID:
+        await cq.answer("Кнопка работает только в админ-чате.", show_alert=True)
+        return
+
+    try:
+        ticket = int(cq.data.split(":")[2])
+    except Exception:
+        await cq.answer("Некорректный ticket.", show_alert=True)
+        return
+
+    user_chat_id = ticket_map.get(ticket)
+    if not user_chat_id:
+        await cq.answer("Не нашёл пользователя по этой заявке (возможно, бот перезапускался).", show_alert=True)
+        return
+
+    awaiting_admin_reply[cq.from_user.id] = {"user_chat_id": user_chat_id, "ticket": ticket}
+    await cq.answer()
+
+    await bot.send_message(
+        SUPPORT_GROUP_ID,
+        f"Окей. Напишите сообщение — я отправлю его пользователю по заявке <b>#{ticket}</b>.\n"
+        f"Чтобы отменить, отправьте <code>/cancel_reply</code>."
+    )
+
+@dp.message(Command("cancel_reply"))
+async def cancel_admin_reply(msg: Message):
+    if SUPPORT_GROUP_ID is None or msg.chat.id != SUPPORT_GROUP_ID:
+        return
+    if msg.from_user.id in awaiting_admin_reply:
+        awaiting_admin_reply.pop(msg.from_user.id, None)
+        await msg.reply("Окей, отменил режим ответа пользователю.")
+    else:
+        await msg.reply("Режим ответа не активен.")
+
+# =======================
+#   PRIVATE MESSAGES
+# =======================
+
 @dp.message(F.chat.type == "private", ~F.from_user.is_bot)
 async def handle_private(msg: Message):
     if not SUPPORT_GROUP_ID:
-        await msg.answer("⚠️ SUPPORT_GROUP_ID не настроен. Админам: добавьте переменную в Railway.")
+        await msg.answer("⚠️ SUPPORT_GROUP_ID не настроен.")
         return
 
     uid = msg.from_user.id
     st = states.get(uid)
 
-    # ====== CONTACT MODE ======
+    # CONTACT MODE
     if st and st.get("mode") == "contact":
         ticket = gen_ticket()
-        header = (
+        # отправляем обычным текстом в группу
+        sent = await bot.send_message(
+            SUPPORT_GROUP_ID,
             f"✉️ <b>Обращение #{ticket}</b>\n"
             f"От: {user_label(msg)}\n\n"
-            f"{(msg.text or msg.caption or '—').strip()}"
+            f"{(msg.text or msg.caption or '—').strip()}",
+            reply_markup=reply_user_kb(ticket)
         )
-        await send_to_support(header, msg.chat.id)
+        forward_map[sent.message_id] = msg.chat.id
+        ticket_map[ticket] = msg.chat.id
+
         await msg.answer(
             f"Ваше обращение зарегистрировано под номером <b>#{ticket}</b>.\n"
             "Мы ответим вам в ближайшее время.",
@@ -273,7 +318,7 @@ async def handle_private(msg: Message):
         states.pop(uid, None)
         return
 
-    # ====== PAYOUT MODE ======
+    # PAYOUT MODE
     if st and st.get("mode") == "payout":
         stage = st.get("stage")
         ticket = st.get("ticket")
@@ -286,9 +331,9 @@ async def handle_private(msg: Message):
             st["link"] = url
             st["stage"] = "proof"
             await msg.answer(
-                f"Ссылка принята ✅\n\n"
+                "Ссылка принята ✅\n\n"
                 f"Заявка <b>#{ticket}</b>\n"
-                f"Шаг <b>2/3</b> — пришлите <b>один</b> скрин/файл подтверждения (фото/документ/PDF/видео). "
+                "Шаг <b>2/3</b> — пришлите <b>один</b> скрин/файл подтверждения (фото/документ/PDF/видео). "
                 "Альбомы не принимаются."
             )
             return
@@ -301,41 +346,60 @@ async def handle_private(msg: Message):
             st["media"] = media
             st["stage"] = "requisites"
             await msg.answer(
-                f"Пруф получен ✅\n\n"
+                "Пруф получен ✅\n\n"
                 f"Заявка <b>#{ticket}</b>\n"
                 "Шаг <b>3/3</b> — укажите реквизиты для выплаты (USDT TON/TRC20) или другой способ связи."
             )
             return
 
         if stage == "requisites":
-            requisites = (msg.text or msg.caption or "").strip()
-            if not requisites:
-                requisites = "—"
+            requisites = (msg.text or msg.caption or "").strip() or "—"
             st["requisites"] = requisites
 
-            header = (
+            # собираем caption (инфа + номер)
+            caption = (
                 f"🧾 <b>Заявка на выплату #{ticket}</b>\n"
                 f"От: {user_label(msg)}\n"
                 f"🔗 Ссылка: {st.get('link','—')}\n"
                 f"💼 Реквизиты: {st.get('requisites','—')}"
             )
-            await send_to_support(header, msg.chat.id)
 
+            # отправляем В ГРУППУ ОДНИМ СООБЩЕНИЕМ С МЕДИА + КНОПКА
             m = st.get("media")
-            if m:
-                cap = m.get("caption") or ""
-                if m["type"] == "photo":
-                    sent = await bot.send_photo(SUPPORT_GROUP_ID, m["file_id"], caption=cap or f"Пруф к заявке #{ticket}")
-                    forward_map[sent.message_id] = msg.chat.id
-                elif m["type"] == "document":
-                    sent = await bot.send_document(SUPPORT_GROUP_ID, m["file_id"], caption=cap or f"Пруф к заявке #{ticket}")
-                    forward_map[sent.message_id] = msg.chat.id
-                elif m["type"] == "video":
-                    sent = await bot.send_video(SUPPORT_GROUP_ID, m["file_id"], caption=cap or f"Пруф к заявке #{ticket}")
-                    forward_map[sent.message_id] = msg.chat.id
-                elif m["type"] == "animation":
-                    sent = await bot.send_animation(SUPPORT_GROUP_ID, m["file_id"], caption=cap or f"Пруф к заявке #{ticket}")
-                    forward_map[sent.message_id] = msg.chat.id
+            sent_msg = None
+
+            if m["type"] == "photo":
+                sent_msg = await bot.send_photo(
+                    SUPPORT_GROUP_ID,
+                    m["file_id"],
+                    caption=caption,
+                    reply_markup=reply_user_kb(ticket)
+                )
+            elif m["type"] == "document":
+                sent_msg = await bot.send_document(
+                    SUPPORT_GROUP_ID,
+                    m["file_id"],
+                    caption=caption,
+                    reply_markup=reply_user_kb(ticket)
+                )
+            elif m["type"] == "video":
+                sent_msg = await bot.send_video(
+                    SUPPORT_GROUP_ID,
+                    m["file_id"],
+                    caption=caption,
+                    reply_markup=reply_user_kb(ticket)
+                )
+            elif m["type"] == "animation":
+                sent_msg = await bot.send_animation(
+                    SUPPORT_GROUP_ID,
+                    m["file_id"],
+                    caption=caption,
+                    reply_markup=reply_user_kb(ticket)
+                )
+
+            if sent_msg:
+                forward_map[sent_msg.message_id] = msg.chat.id
+                ticket_map[ticket] = msg.chat.id
 
             await msg.answer(
                 f"✅ Заявка отправлена. Ваш номер: <b>#{ticket}</b>\n"
@@ -343,22 +407,40 @@ async def handle_private(msg: Message):
                 "Если у вас есть ещё видео — подайте новую заявку.",
                 reply_markup=again_kb()
             )
+
             states.pop(uid, None)
             return
 
-    # ====== DEFAULT: ignore or route to support? ======
-    # Если человек пишет что-то вне режимов — отправим в группу как обычное сообщение.
-    header = f"🆕 Сообщение от {user_label(msg)}"
-    await send_to_support(header, msg.chat.id)
-    sent = await msg.copy_to(SUPPORT_GROUP_ID)
-    forward_map[sent.message_id] = msg.chat.id
+    # DEFAULT: если вне режимов — трактуем как “связаться с админом”
+    states[uid] = {"mode": "contact"}
+    await msg.answer("Напишите ваш вопрос — мы ответим вам в ближайшее время.", reply_markup=back_kb())
 
 # =======================
-#   GROUP REPLIES -> USER
+#   GROUP: ADMIN MESSAGES
 # =======================
 
 @dp.message(lambda m: SUPPORT_GROUP_ID is not None and m.chat.id == SUPPORT_GROUP_ID)
 async def handle_group(msg: Message):
+    # 1) Если админ в режиме ответа после кнопки
+    ar = awaiting_admin_reply.get(msg.from_user.id)
+    if ar and (msg.text or msg.caption or msg.photo or msg.document or msg.video or msg.animation):
+        user_chat_id = ar["user_chat_id"]
+        ticket = ar["ticket"]
+        prefix = f"Ответ по заявке #{ticket}:\n\n"
+
+        try:
+            if msg.text:
+                await bot.send_message(user_chat_id, prefix + msg.text)
+            elif msg.caption:
+                await msg.copy_to(user_chat_id, caption=prefix + msg.caption)
+            else:
+                await msg.copy_to(user_chat_id)
+            await msg.reply(f"Отправил пользователю ответ по заявке #{ticket}.")
+        finally:
+            awaiting_admin_reply.pop(msg.from_user.id, None)
+        return
+
+    # 2) Старый способ: reply на сообщение в группе
     if not msg.reply_to_message:
         return
 
@@ -370,7 +452,6 @@ async def handle_group(msg: Message):
         return
 
     prefix = f"Ответ от админа: {msg.from_user.full_name}\n\n"
-
     if msg.text:
         await bot.send_message(user_chat_id, prefix + msg.text)
     elif msg.caption:
