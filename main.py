@@ -143,8 +143,9 @@ PODCASTS_TEXT = (
     "• Или-или: Bushido Zho, Frame Tamer, Руслан Усачев, Денис Кукояка\n"
     "• VSRAP Podcast — MADK1D\n"
     "• VSRAP Podcast — Темный принц\n"
-    "• VSRAP Podcast — Feduk\n"
-    "• VSRAP Podcast — Фломастер"
+    "• VSRAP Podcast — Смоки Мо\n"
+    "• VSRAP Podcast — МОЛОДОЙ КАЛУГА\n"
+    "• VSRAP Podcast — KUNTEYNIR"
     "</blockquote>\n\n"
 
     "Нарезки с других видео могут быть отклонены."
